@@ -1,29 +1,51 @@
-FROM --platform=$TARGETPLATFORM golang:bookworm AS build
+# Define arguments
+ARG PROTONMAIL_BRIDGE_VERSION="v3.21.2"
+
+FROM golang:1.24.5-alpine3.22 AS build
+
+# Metadata
 LABEL authors="David BASTIEN"
-ARG ENV_PROTONMAIL_BRIDGE_VERSION
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
+
+# Define arguments
+ARG PROTONMAIL_BRIDGE_VERSION
 
 # Install dependencies
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y git build-essential libsecret-1-dev
+RUN apk update --no-cache && \
+    apk add --no-cache \
+      bash \
+      make \
+      gcc \
+      g++ \
+      libc-dev \
+      musl \
+      musl-dev \
+      sed \
+      grep \
+      sed \
+      git \
+      libsecret \
+      libsecret-dev \
+      pass
 
 # Build stage
 WORKDIR /build/
-RUN set -eux; \
-    git clone -b $ENV_PROTONMAIL_BRIDGE_VERSION https://github.com/ProtonMail/proton-bridge.git
+RUN git clone -b ${PROTONMAIL_BRIDGE_VERSION} https://github.com/ProtonMail/proton-bridge.git
 WORKDIR /build/proton-bridge/
-RUN set -eux; \
-    make build-nogui vault-editor
+
+# make
+RUN make build-nogui vault-editor
 
 # Working stage image
-FROM --platform=$TARGETPLATFORM golang:bookworm
+FROM alpine:3.22.1
+
+# Metadata
 LABEL authors="David BASTIEN"
 LABEL org.opencontainers.image.source="https://github.com/VideoCurio/ProtonMailBridgeDocker"
 
 # Define arguments and env variables
 ARG TARGETPLATFORM
+ARG PROTONMAIL_BRIDGE_VERSION
+
 # Indicate (NOT define) the ports/network interface really used by Proton bridge mail.
 # It should be 1025/tcp and 1143/tcp but on some k3s instances it could be 1026 and 1144 (why ?)
 # Launch `netstat -ltnp` on a running container to be sure.
@@ -40,31 +62,31 @@ ENV CONTAINER_SMTP_PORT=$ENV_CONTAINER_SMTP_PORT
 ENV CONTAINER_IMAP_PORT=$ENV_CONTAINER_IMAP_PORT
 
 ENV ENV_TARGET_PLATFORM=$TARGETPLATFORM
+ENV PROTONMAIL_BRIDGE_VERSION=${PROTONMAIL_BRIDGE_VERSION}
 
 # Install dependencies
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y bash socat net-tools pass ca-certificates libsecret-1-0
+RUN apk update --no-cache && \
+    apk add --no-cache \
+    bash \
+    procps \
+    socat \
+    libsecret \
+    pass \
+    gpg \
+    gpg-agent \
+    ca-certificates
+
 # Copy executables made during previous stage
-WORKDIR /usr/bin/
-COPY --from=build /build/proton-bridge/bridge /usr/bin/
-COPY --from=build /build/proton-bridge/proton-bridge /usr/bin/
-COPY --from=build /build/proton-bridge/vault-editor /usr/bin/
+WORKDIR /app/
+COPY --from=build /build/proton-bridge/bridge /app/
+COPY --from=build /build/proton-bridge/proton-bridge /app/
+COPY --from=build /build/proton-bridge/vault-editor /app/
 
 # Install needed scripts and files
-WORKDIR /app/
-COPY VERSION /app/
-COPY entrypoint.sh /app/
-RUN chmod u+x /app/entrypoint.sh
+COPY --chmod=u+x entrypoint.sh /app/
 COPY GPGparams.txt /app/
 
 COPY LICENSE.txt /app/
-
-# SMTP and IMAP ports (25/tcp and 143/tcp) are not exposed by default, so you could adjust them if necessary with ENV
-# variables CONTAINER_SMTP_PORT and CONTAINER_IMAP_PORT.
-# See README.md and/or compose.yaml file.
-# EXPOSE ${ENV_CONTAINER_SMTP_PORT}/tcp
-# EXPOSE ${ENV_CONTAINER_IMAP_PORT}/tcp
 
 # Volume to save pass and bridge configurations/data
 VOLUME /root

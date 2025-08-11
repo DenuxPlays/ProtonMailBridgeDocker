@@ -1,35 +1,56 @@
 #!/usr/bin/env bash
 
-set -ex
+set -exuo pipefail
 
-VERSION=$(cat VERSION)
-
-echo "Welcome to my Proton Mail Bridge docker container ${VERSION} !"
+echo "Welcome to my Proton Mail Bridge docker container ${PROTONMAIL_BRIDGE_VERSION:-Unknown Version} !"
 echo "Copyright (C) 2025  David BASTIEN - See /app/LICENSE.txt "
 
-# Check if the gpg key exist, if not created it. Should be run only on first launch.
+# Check if this is the first launch based on GPG key existence
+FIRST_LAUNCH=false
 if [ ! -d "/root/.password-store/" ]; then
-  gpg --generate-key --batch /app/GPGparams.txt
-  gpg --list-keys
-  pass init ProtonMailBridge
+    FIRST_LAUNCH=true
+else
+    FIRST_LAUNCH=false
+fi
+
+echo "First launch: $FIRST_LAUNCH"
+
+# If this is the first launch, generate GPG key and initialize password store
+if [ "$FIRST_LAUNCH" = true ]; then
+    gpg --generate-key --batch /app/GPGparams.txt
+    gpg --list-keys
+    pass init ProtonMailBridge
+fi
+
+# Kill any process that block the GPG database if this is not the first launch
+if [ "$FIRST_LAUNCH" = false ]; then
+    # Kill any GPG processes and clean up locks before starting bridge
+    pkill -f "gpg\|keyboxd" || true
+    rm -rf /root/.gnupg/*.lock /root/.gnupg/*/*.lock /root/.gnupg/*/lock 2>/dev/null || true
+    sleep 1
+
+    # Start fresh GPG agent
+    gpg-agent --daemon --allow-preset-passphrase
+fi
+
+# Execute cli
+if [[ ${1:-} == cli ]]; then
+    # Kill any running instance to "unlock" the bridge
+    # || true is used to avoid errors if the process is not running
+    pkill protonmail-bridge || true
+
+    # Login
+    /app/bridge --cli "$@"
+
+    exit 0
 fi
 
 # Check if some env variables exist.
-if ! [[ -v PROTON_BRIDGE_SMTP_PORT ]]; then
-  echo "WARNING! Environment variable PROTON_BRIDGE_SMTP_PORT is not defined!"
-fi
-if ! [[ -v PROTON_BRIDGE_IMAP_PORT ]]; then
-  echo "WARNING! Environment variable PROTON_BRIDGE_IMAP_PORT is not defined!"
-fi
-if ! [[ -v PROTON_BRIDGE_HOST ]]; then
-  echo "WARNING! Environment variable PROTON_BRIDGE_HOST is not defined!"
-fi
-if ! [[ -v CONTAINER_SMTP_PORT ]]; then
-  echo "WARNING! Environment variable CONTAINER_SMTP_PORT is not defined!"
-fi
-if ! [[ -v CONTAINER_IMAP_PORT ]]; then
-  echo "WARNING! Environment variable CONTAINER_IMAP_PORT is not defined!"
-fi
+PROTON_BRIDGE_SMTP_PORT=${PROTON_BRIDGE_SMTP_PORT:?"is unset or null"}
+PROTON_BRIDGE_IMAP_PORT=${PROTON_BRIDGE_IMAP_PORT:?"is unset or null"}
+PROTON_BRIDGE_HOST=${PROTON_BRIDGE_HOST:?"is unset or null"}
+CONTAINER_SMTP_PORT=${CONTAINER_SMTP_PORT:?"is unset or null"}
+CONTAINER_IMAP_PORT=${CONTAINER_IMAP_PORT:?"is unset or null"}
 
 echo "Build for ${ENV_TARGET_PLATFORM} platform."
 
@@ -40,6 +61,9 @@ socat TCP-LISTEN:"$CONTAINER_IMAP_PORT",fork TCP:"$PROTON_BRIDGE_HOST":"$PROTON_
 # Start a default Proton Mail Bridge on a fake tty, so it won't stop because of EOF
 rm -f faketty
 mkfifo faketty
-cat faketty | /usr/bin/bridge --cli
+
+# This is a workaround to still be able to see the output of the bridge in the logs.
+# shellcheck disable=SC2002
+cat faketty | /app/bridge --cli
 
 echo "Done."
